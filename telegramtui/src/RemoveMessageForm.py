@@ -1,4 +1,5 @@
 import curses
+import asyncio
 from telegramtui.src.telegramApi import client
 from telegramtui.src import npyscreen
 
@@ -9,37 +10,37 @@ class RemoveMessageForm(npyscreen.ActionForm):
         y, x = self.parentApp.MainForm.useable_space()
         self.show_atx = x // 2 - 10
         self.show_aty = y // 2 - 5
-
         self.name = "Delete Message?"
-        new_handlers = {
-            # exit
+
+        self.add_handlers({
             "^Q": self.exit_func,
             155: self.exit_func,
             curses.ascii.ESC: self.exit_func
-        }
-        self.add_handlers(new_handlers)
+        })
 
         self.display()
 
     def on_ok(self):
+        asyncio.ensure_future(self._delete_selected_message())
+
+    async def _delete_selected_message(self):
         current_message = self.parentApp.MainForm.messageBoxObj.entry_widget.cursor_line
         current_user = self.parentApp.MainForm.chatBoxObj.value
-        messages = self.parentApp.MainForm.messageBoxObj.get_messages_info(current_user)
+        messages = await client.get_messages(current_user)
 
-        message_id = messages[-current_message - 1].id
+        try:
+            selected_message = messages[len(messages) - current_message - 1]
+            await client.delete_message(current_user, selected_message.id)
 
-        client.delete_message(current_user, message_id)
-
-        new_data = []
-        for i in range(len(client.messages[current_user])):
-            if client.messages[current_user][i].id != message_id:
-                new_data.append(client.messages[current_user][i])
-
-        client.messages[current_user] = new_data
-
-        self.parentApp.MainForm.messageBoxObj.update_messages(current_user)
-        self.parentApp.MainForm.messageBoxObj.display()
-        self.parentApp.switchForm("MAIN")
+            # Update local cache
+            client.messages[current_user] = [
+                msg for msg in client.messages[current_user] if msg.id != selected_message.id
+            ]
+            self.parentApp.MainForm.messageBoxObj.update_messages(current_user)
+            self.parentApp.MainForm.messageBoxObj.display()
+            self.parentApp.switchForm("MAIN")
+        except IndexError:
+            npyscreen.notify_confirm("Invalid message selection.", title="Error")
 
     def on_cancel(self):
         self.parentApp.switchForm("MAIN")

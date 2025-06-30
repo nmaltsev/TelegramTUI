@@ -7,7 +7,7 @@ verify_ssl = true
 
 [packages]
 pillow = "==6.2.1"
-telethon = "==0.19.1.6"
+telethon = "==1.40.0"
 pysocks = "==1.7.1"
 python-aalib = "*"
 windows-curses = {version = ">=2.0",sys_platform = "=='win32'"}
