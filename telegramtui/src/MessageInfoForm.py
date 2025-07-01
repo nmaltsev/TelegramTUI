@@ -1,15 +1,17 @@
 import curses
+import asyncio
+import logging
 from telegramtui.src.telegramApi import client
 from telegramtui.src import npyscreen
 import textwrap
 from datetime import timedelta
 from telegramtui.src.config import get_config
-import logging
+from telethon.tl import types
 
 logging.basicConfig(filename="newfile.log",
                     format='%(asctime)s %(message)s',
                     filemode='w')
-logger=logging.getLogger()
+logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 
 
@@ -37,7 +39,6 @@ class MessageInfoForm(npyscreen.ActionForm):
 
     def update(self):
         current_user = self.parentApp.MainForm.chatBoxObj.value
-        current_user_name = client.dialogs[current_user].name
         current_message = self.parentApp.MainForm.messageBoxObj.value
         messages = self.parentApp.MainForm.messageBoxObj.get_messages_info(current_user)
         current_id = messages[-current_message - 1].id
@@ -46,14 +47,45 @@ class MessageInfoForm(npyscreen.ActionForm):
         prepared_text = self.prepare_message(message_info.message)
 
         self.current_user = current_user
-        self.sender.value = current_user_name + " (id " + str(client.dialogs[current_user].entity.id) + ")"
         self.mess_id.value = current_id
         self.date.value = str(messages[-current_message - 1].date + (timedelta(self.timezone) // 24))
         self.attachment.value = self.prepare_media(message_info)
         self.forward.value = self.prepare_forward_messages(message_info)
         self.text.values = prepared_text
         self.text.max_height = len(prepared_text)
-        self.display()
+        
+        # Update sender information asynchronously
+        asyncio.run_coroutine_threadsafe(
+            self.update_sender(message_info),
+            client.loop
+        )
+
+    async def update_sender(self, message):
+        """Asynchronously update sender information"""
+        try:
+            if message.sender_id:
+                # Get the sender entity
+                sender = await client.client.get_entity(message.sender_id)
+                
+                # Format sender name based on type
+                if isinstance(sender, types.User):
+                    name = f"{sender.first_name or ''} {sender.last_name or ''}".strip()
+                    self.sender.value = f"{name} (id {sender.id})"
+                elif isinstance(sender, types.Channel):
+                    self.sender.value = f"{sender.title} (id {sender.id})"
+                elif isinstance(sender, types.Chat):
+                    self.sender.value = f"{sender.title} (id {sender.id})"
+                else:
+                    self.sender.value = f"Unknown entity (id {message.sender_id})"
+            else:
+                self.sender.value = "Unknown sender"
+                
+            # Refresh the display
+            self.display()
+        except Exception as e:
+            logger.error(f"Error getting sender: {e}")
+            self.sender.value = "Error loading sender"
+            self.display()
 
     def prepare_message(self, mess):
         y, x = self.useable_space()
@@ -77,11 +109,12 @@ class MessageInfoForm(npyscreen.ActionForm):
             if hasattr(media, 'photo'):
                 out = "photo"
             elif hasattr(media, 'document'):
-                try:
-                    # print sticker like a emoji
-                    if hasattr(media.document.attributes[1], 'stickerset'):
+                # Check for sticker attribute
+                for attr in media.document.attributes:
+                    if isinstance(attr, types.DocumentAttributeSticker):
                         out = "Sticker"
-                except:
+                        break
+                else:
                     out = "Document"
             else:
                 out = "Unknown attachment"
@@ -91,50 +124,42 @@ class MessageInfoForm(npyscreen.ActionForm):
         return out
 
     def prepare_forward_messages(self, message):
-        user_name = "None"
         fwd_from = message.fwd_from if hasattr(message, 'fwd_from') else None
-        if fwd_from is not None:
-            logger.debug('[message]')
-            logger.debug(str(message))
-            logger.debug(str(dir(message)))
-            logger.debug('[fwd_from]')
-            logger.debug(str(fwd_from))
-            logger.debug(str(dir(fwd_from)))
-            logger.debug('Messages:')
-            logger.debug(str(client.messages))
-        
-            if fwd_from.from_id is not None:
-                #logger.debug(str(dir(fwd_from)))
-                #logger.debug(str(fwd_from.from_reader))
-                #logger.debug(str(fwd_from.post_author))
-                #logger.debug(str(fwd_from.to_dict()))
-                sender = None
-                #logger.debug(str(fwd_from.post_saved_from_msg_id))
-                if hasattr(fwd_from, 'sender'):
-                    sender = fwd_from.sender
-                    user_name = '{} {} (id {})'.format(
-                        sender.first_name, 
-                        sender.last_name if hasattr(sender, 'first_name') and sender.first_name is not None else sender.last_name,
-                        fwd_from.from_id
-                    )
-                    #user_name = sender.first_name + " " + sender.last_name if hasattr(sender, 'first_name') and \
-                    #    sender.first_name is not None else sender.last_name
-                    #user_name += " (id " + str(fwd_from.from_id) + ")"
-                elif hasattr(fwd_from, 'saved_from_msg_id'):
-                    user_name =  '(id {} saved from msg id {})'.format(fwd_from.from_id, fwd_from.saved_from_msg_id) 
-                    # @TODO get author of the message
-                    #user_name = 'TODO from m:' + str(fwd_from.saved_from_msg_id)
-                                        
-                   
-            if fwd_from.channel_id is not None:
-                logger.debug('Channel')
-                logger.debug(str())
-                if hasattr(fwd_from, 'channel'):
-                    user_name = fwd_from.channel.title + " (id " + str(fwd_from.channel.id) + ")"
-                elif hasattr(fwd_from, 'post_author'):
-                    user_name = '{}'.format(fwd_from.post_author)
+        if fwd_from is None:
+            return "None"
+            
+        try:
+            # Handle saved messages
+            if fwd_from.saved_from_peer:
+                if isinstance(fwd_from.saved_from_peer, types.PeerUser):
+                    return f"Saved from User (id {fwd_from.saved_from_peer.user_id})"
+                elif isinstance(fwd_from.saved_from_peer, types.PeerChat):
+                    return f"Saved from Chat (id {fwd_from.saved_from_peer.chat_id})"
+                elif isinstance(fwd_from.saved_from_peer, types.PeerChannel):
+                    return f"Saved from Channel (id {fwd_from.saved_from_peer.channel_id})"
                     
-        return user_name
+            # Handle regular forwards
+            if fwd_from.from_id:
+                if isinstance(fwd_from.from_id, types.PeerUser):
+                    return f"User (id {fwd_from.from_id.user_id})"
+                elif isinstance(fwd_from.from_id, types.PeerChat):
+                    return f"Chat (id {fwd_from.from_id.chat_id})"
+                elif isinstance(fwd_from.from_id, types.PeerChannel):
+                    return f"Channel (id {fwd_from.from_id.channel_id})"
+                    
+            # Handle channel forwards
+            if fwd_from.channel_post is not None:
+                return f"Channel Post (id {fwd_from.channel_post})"
+                
+            # Handle from_name as fallback
+            if fwd_from.from_name:
+                return fwd_from.from_name
+                
+            return "Unknown forward source"
+            
+        except Exception as e:
+            logger.error(f"Error parsing forward: {e}")
+            return "Error parsing forward"
 
     def on_ok(self):
         self.parentApp.switchForm("MAIN")

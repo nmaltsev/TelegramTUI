@@ -1,7 +1,7 @@
 from telegramtui.src import npyscreen
 from telegramtui.src.telegramApi import client
 import time
-
+from telethon.tl import types
 
 class ChatBox(npyscreen.BoxTitle):
 
@@ -23,27 +23,29 @@ class ChatBox(npyscreen.BoxTitle):
         data = []
         for i in range(len(client.dialogs)):
             special = ""
-            if self.emoji:
-                if hasattr(client.dialogs[i].dialog.peer, 'user_id'):
-                    special = "👤 " if not client.dialogs[i].entity.bot else "🤖 "
-                elif hasattr(client.dialogs[i].dialog.peer, 'channel_id'):
-                    special = "📢 "
-                elif hasattr(client.dialogs[i].dialog.peer, 'chat_id'):
-                    special = "👥 "
+            entity = client.dialogs[i].entity
+            
+            # Determine dialog type based on entity
+            if isinstance(entity, types.User):
+                if entity.bot:
+                    special = "🤖 " if self.emoji else "@ "
+                else:
+                    special = "👤 " if self.emoji else "* "
+            elif isinstance(entity, types.Channel):
+                if entity.broadcast:
+                    special = "📢 " if self.emoji else "# "
+                else:  # supergroup
+                    special = "👥 " if self.emoji else "$ "
+            elif isinstance(entity, types.Chat):
+                special = "👥 " if self.emoji else "$ "
             else:
-                if hasattr(client.dialogs[i].dialog.peer, 'user_id'):
-                    special = "* " if not client.dialogs[i].entity.bot else "@ "
-                elif hasattr(client.dialogs[i].dialog.peer, 'channel_id'):
-                    special = "# "
-                elif hasattr(client.dialogs[i].dialog.peer, 'chat_id'):
-                    special = "$ "
+                special = "❓ " if self.emoji else "? "
 
             timestamp = int(time.time())
-
-            mute_until = client.dialogs[i].dialog.notify_settings.mute_until
+            mute_until = client.dialogs[i].notify_settings.mute_until
             mute_until = 0 if mute_until is None else int(mute_until)
 
-            if timestamp >= int(mute_until):
+            if timestamp >= mute_until:
                 unread += int(client.dialogs[i].unread_count)
 
             highlight = []

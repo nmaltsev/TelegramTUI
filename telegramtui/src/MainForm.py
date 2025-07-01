@@ -1,4 +1,5 @@
 import curses
+import asyncio
 from datetime import timedelta
 from telegramtui.src.telegramApi import client
 from telegramtui.src import npyscreen
@@ -77,7 +78,11 @@ class MainForm(npyscreen.FormBaseNew):
         self.chatBoxObj.update_chat()
         self.messageBoxObj.update_messages(current_user)
 
-        client.read_all_messages(current_user)
+        # Schedule read operation in async thread
+        asyncio.run_coroutine_threadsafe(
+            client.read_all_messages(current_user),
+            client.loop
+        )
 
     def event_messagebox_change_cursor(self, event):
         current_user = self.chatBoxObj.value
@@ -91,10 +96,15 @@ class MainForm(npyscreen.FormBaseNew):
     def message_send(self, event):
         current_user = self.chatBoxObj.value
         message = self.inputBoxObj.value.strip()
-        if message is not "":
-            client.message_send(message, current_user)
+        if message != "":
+            # Schedule message send in async thread
+            asyncio.run_coroutine_threadsafe(
+                client.message_send(message, current_user),
+                client.loop
+            )
+            
+            # Optimistically update UI
             self.messageBoxObj.update_messages(current_user)
-
             self.inputBoxObj.value = ""
             self.inputBoxObj.display()
 
@@ -102,8 +112,7 @@ class MainForm(npyscreen.FormBaseNew):
         self.parentApp.switchForm("SEND_FILE")
 
     def forward_message(self, event):
-        pass
-        # self.parentApp.switchForm("FORWARD_MESSAGE")
+        self.parentApp.switchForm("FORWARD_MESSAGE")
 
     def remove_message(self, event):
         self.parentApp.switchForm("REMOVE_MESSAGE")
@@ -123,11 +132,15 @@ class MainForm(npyscreen.FormBaseNew):
     def while_waiting(self):
         current_user = self.chatBoxObj.value
 
-        client.client.sync_updates()
+        # Check if we have updates from Telegram thread
         if client.need_update_message:
             if client.need_update_current_user == current_user:
                 self.messageBoxObj.update_messages(current_user)
-                client.read_all_messages(current_user)
+                # Schedule read operation in async thread
+                asyncio.run_coroutine_threadsafe(
+                    client.read_all_messages(current_user),
+                    client.loop
+                )
                 client.dialogs[current_user].unread_count = 0
 
             self.chatBoxObj.update_chat()

@@ -1,13 +1,17 @@
+import asyncio
 import socks, os
 from telethon import TelegramClient, events
+from telethon.tl import types, functions
 from datetime import timedelta
 from telegramtui.src.config import get_config
-
+import threading
 
 class TelegramApi:
     client = None
     dialogs = []
     messages = []
+    online = []
+    me = None
 
     need_update_message = 0
     need_update_online = 0
@@ -15,10 +19,18 @@ class TelegramApi:
     need_update_read_messages = 0
 
     def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.start_async, daemon=True)
+        self.thread.start()
+
+    def start_async(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self._async_init())
+
+    async def _async_init(self):
         config = get_config()
         api_id = config.get('telegram_api', 'api_id')
         api_hash = config.get('telegram_api', 'api_hash')
-        workers = config.get('telegram_api', 'workers')
         session_name = config.get('telegram_api', 'session_name')
 
         self.timezone = int(config.get('other', 'timezone'))
@@ -43,86 +55,82 @@ class TelegramApi:
         session_name = os.path.expanduser("~") + '/.config/telegramtui/' + session_name
 
         # create connection
-        self.client = TelegramClient(session_name, api_id, api_hash, update_workers=int(workers),
-                                     spawn_read_thread=True, proxy=proxy)
+        self.client = TelegramClient(
+            session_name, 
+            api_id, 
+            api_hash, 
+            system_version="4.16.30-vxCustom",
+            proxy=proxy
+        )
         try:
-            self.client.start()
-        except Exception as ex:
-            print("Something wrong: " + str(ex))
-            exit(1)
+            await self.client.start()
+            self.me = await self.client.get_me()
+            self.dialogs = await self.client.get_dialogs(limit=self.message_dialog_len)
+            self.messages = [None] * len(self.dialogs)
+            self.online = [""] * len(self.dialogs)
+            
+            if self.dialogs:
+                self.messages[0] = await self.client.get_messages(self.dialogs[0].entity, limit=self.message_dialog_len)
 
-        self.me = self.client.get_me()
-        self.dialogs = self.client.get_dialogs(limit=self.message_dialog_len)
-        # TODO should be a dictionary!
-        self.messages = len(self.dialogs) * [None]
-        self.online = len(self.dialogs) * [""]
-        self.messages[0] = self.client.get_messages(self.dialogs[0].entity, limit=self.message_dialog_len)
-
-        # event for new messages
-        @self.client.on(events.NewMessage)
-        def my_event_handler(event):
-            for i in range(len(self.dialogs)):
-                # if event message from user
-                if hasattr(self.dialogs[i].dialog.peer, 'user_id') and hasattr(event._chat_peer, 'user_id') and \
-                        self.dialogs[i].dialog.peer.user_id == event._chat_peer.user_id:
-                    self.event_message(i)
-                # from chat
-                elif hasattr(self.dialogs[i].dialog.peer, 'chat_id') and hasattr(event._chat_peer, 'chat_id') and \
-                        self.dialogs[i].dialog.peer.chat_id == event._chat_peer.chat_id:
-                    self.event_message(i)
-                # from chat
-                elif hasattr(self.dialogs[i].dialog.peer, 'channel_id') and hasattr(event._chat_peer, 'channel_id') and \
-                        self.dialogs[i].dialog.peer.channel_id == event._chat_peer.channel_id:
-                    self.event_message(i)
-                # other
-                else:
-                    pass
-
-        # event for read messages
-        @self.client.on(events.Raw())
-        def my_event_handler(event):
-            if hasattr(event, 'confirm_received') and hasattr(event, 'max_id'):
+            # event for new messages
+            @self.client.on(events.NewMessage)
+            async def my_event_handler(event):
                 for i in range(len(self.dialogs)):
-                    # from user
-                    if hasattr(self.dialogs[i].dialog.peer, 'user_id') and hasattr(event.peer, 'user_id') and \
-                            self.dialogs[i].dialog.peer.user_id == event.peer.user_id:
-                        self.dialogs[i].dialog.read_outbox_max_id = event.max_id
+                    if hasattr(self.dialogs[i].entity, 'user_id') and hasattr(event.message.peer_id, 'user_id') and \
+                            self.dialogs[i].entity.user_id == event.message.peer_id.user_id:
+                        await self.event_message(i)
+                    elif hasattr(self.dialogs[i].entity, 'chat_id') and hasattr(event.message.peer_id, 'chat_id') and \
+                            self.dialogs[i].entity.chat_id == event.message.peer_id.chat_id:
+                        await self.event_message(i)
+                    elif hasattr(self.dialogs[i].entity, 'channel_id') and hasattr(event.message.peer_id, 'channel_id') and \
+                            self.dialogs[i].entity.channel_id == event.message.peer_id.channel_id:
+                        await self.event_message(i)
+
+            # event for read messages
+            @self.client.on(events.MessageRead)
+            async def read_event_handler(event):
+                for i in range(len(self.dialogs)):
+                    if hasattr(self.dialogs[i].entity, 'user_id') and hasattr(event.peer, 'user_id') and \
+                            self.dialogs[i].entity.user_id == event.peer.user_id:
+                        self.dialogs[i].read_outbox_max_id = event.max_id
                         self.need_update_current_user = i
-                    # from chat
-                    elif hasattr(self.dialogs[i].dialog.peer, 'chat_id') and hasattr(event.peer, 'chat_id') and \
-                            self.dialogs[i].dialog.peer.chat_id == event.peer.chat_id:
-                        self.dialogs[i].dialog.read_outbox_max_id = event.max_id
+                    elif hasattr(self.dialogs[i].entity, 'chat_id') and hasattr(event.peer, 'chat_id') and \
+                            self.dialogs[i].entity.chat_id == event.peer.chat_id:
+                        self.dialogs[i].read_outbox_max_id = event.max_id
                         self.need_update_current_user = i
-                    # other
-                    else:
-                        pass
                 self.need_update_read_messages = 1
 
-        # event for online/offline
-        @self.client.on(events.UserUpdate(chats=None, blacklist_chats=False))
-        def my_event_handler(event):
-            for i in range(len(self.dialogs)):
-                if hasattr(self.dialogs[i].dialog.peer, 'user_id') and hasattr(event._chat_peer, 'user_id') and \
-                        self.dialogs[i].dialog.peer.user_id == event._chat_peer.user_id:
-                    # I think need little bit change this
-                    if event.online:
-                        self.online[i] = "Online"
-                    elif event.last_seen is not None:
-                        self.online[i] = "Last seen at " + str(event.last_seen + (timedelta(self.timezone) // 24))
-                    else:
-                        self.online[i] = ""
-                    self.need_update_current_user = i
+            # event for online/offline
+            @self.client.on(events.UserUpdate)
+            async def user_update_handler(event):
+                user = event.user
+                for i in range(len(self.dialogs)):
+                    if hasattr(self.dialogs[i].entity, 'user_id') and user.id == self.dialogs[i].entity.user_id:
+                        if isinstance(user.status, types.UserStatusOnline):
+                            self.online[i] = "Online"
+                        elif isinstance(user.status, types.UserStatusOffline):
+                            self.online[i] = "Last seen at " + str(user.status.was_online + (timedelta(self.timezone) // 24)
+                        else:
+                            self.online[i] = ""
+                        self.need_update_current_user = i
+                self.need_update_online = 1
 
-            self.need_update_online = 1
+        except Exception as ex:
+            print("Something wrong: " + str(ex))
+            os._exit(1)
 
-    def event_message(self, user_id):
+    async def event_message(self, user_id):
         if self.messages[user_id] is None:
-            self.get_messages(user_id)
-            new_message = self.client.get_messages(self.dialogs[user_id].entity,
-                                                   min_id=self.messages[user_id][0].id - 1)
+            await self.get_messages(user_id)
+            new_message = await self.client.get_messages(
+                self.dialogs[user_id].entity,
+                min_id=self.messages[user_id][0].id - 1
+            )
         else:
-            new_message = self.client.get_messages(self.dialogs[user_id].entity,
-                                                   min_id=self.messages[user_id][0].id)
+            new_message = await self.client.get_messages(
+                self.dialogs[user_id].entity,
+                min_id=self.messages[user_id][0].id
+            )
 
         for j in range(len(new_message) - 1, -1, -1):
             self.messages[user_id].insert(0, new_message[j])
@@ -134,47 +142,47 @@ class TelegramApi:
         self.need_update_message = 1
         self.need_update_current_user = user_id
 
-    def get_messages(self, user_id):
+    async def get_messages(self, user_id):
         if self.messages[user_id] is None:
-            data = self.client.get_messages(self.dialogs[user_id].entity, limit=self.message_dialog_len)
-            # need check exceptions
+            data = await self.client.get_messages(
+                self.dialogs[user_id].entity, 
+                limit=self.message_dialog_len
+            )
             self.messages[user_id] = data
             self.messages[user_id].sort(key=lambda x: x.id, reverse=True)
             return data
         else:
             return self.messages[user_id]
 
-    def get_message_by_id(self, user_id, message_id):
+    async def get_message_by_id(self, user_id, message_id):
         for i in range(len(self.messages[user_id])):
             if self.messages[user_id][i].id == message_id:
                 return self.messages[user_id][i]
-        # return self.client.get_messages(self.dialogs[user_id].entity, limit=1, min_id=message_id-1)
 
-    def delete_message(self, user_id, message_id):
-        self.client.delete_messages(self.dialogs[user_id].entity, message_id)
+    async def delete_message(self, user_id, message_id):
+        await self.client.delete_messages(
+            self.dialogs[user_id].entity, 
+            [message_id]
+        )
 
-    def download_media(self, media, path):
-        return self.client.download_media(media, path)
+    async def download_media(self, media, path):
+        return await self.client.download_media(media, path)
 
-    def message_send(self, message, user_id, reply=None):
-        data = self.client.send_message(self.dialogs[user_id].entity, message, reply_to=reply)
-        # read message
-        self.client.send_read_acknowledge(self.dialogs[user_id].entity, max_id=data.id)
+    async def message_send(self, message, user_id, reply=None):
+        data = await self.client.send_message(
+            self.dialogs[user_id].entity, 
+            message, 
+            reply_to=reply
+        )
+        await self.client.send_read_acknowledge(
+            self.dialogs[user_id].entity, 
+            max_id=data.id
+        )
 
-        # save message
-        new_message = self.client.get_messages(self.dialogs[user_id].entity, min_id=(data.id - 1))
-
-        for j in range(len(new_message) - 1, -1, -1):
-            self.messages[user_id].insert(0, new_message[j])
-
-        self.messages[user_id].sort(key=lambda x: x.id, reverse=True)
-        self.remove_duplicates(self.messages[user_id])
-
-    def file_send(self, file, user_id, func):
-        data = self.client.send_file(self.dialogs[user_id].entity, file, progress_callback=func)
-
-        # save message
-        new_message = self.client.get_messages(self.dialogs[user_id].entity, min_id=(data.id - 1))
+        new_message = await self.client.get_messages(
+            self.dialogs[user_id].entity, 
+            min_id=(data.id - 1)
+        )
 
         for j in range(len(new_message) - 1, -1, -1):
             self.messages[user_id].insert(0, new_message[j])
@@ -182,10 +190,30 @@ class TelegramApi:
         self.messages[user_id].sort(key=lambda x: x.id, reverse=True)
         self.remove_duplicates(self.messages[user_id])
 
-    def read_all_messages(self, user_id):
-        if hasattr(self.messages[user_id][0], 'id'):
-            self.client.send_read_acknowledge(self.dialogs[user_id].entity,
-                                              max_id=self.messages[user_id][0].id)
+    async def file_send(self, file, user_id, func):
+        data = await self.client.send_file(
+            self.dialogs[user_id].entity, 
+            file, 
+            progress_callback=func
+        )
+
+        new_message = await self.client.get_messages(
+            self.dialogs[user_id].entity, 
+            min_id=(data.id - 1)
+        )
+
+        for j in range(len(new_message) - 1, -1, -1):
+            self.messages[user_id].insert(0, new_message[j])
+
+        self.messages[user_id].sort(key=lambda x: x.id, reverse=True)
+        self.remove_duplicates(self.messages[user_id])
+
+    async def read_all_messages(self, user_id):
+        if self.messages[user_id] and hasattr(self.messages[user_id][0], 'id'):
+            await self.client.send_read_acknowledge(
+                self.dialogs[user_id].entity,
+                max_id=self.messages[user_id][0].id
+            )
 
     def remove_duplicates(self, messages):
         i = 0
@@ -199,4 +227,5 @@ class TelegramApi:
         return messages
 
 
+# Create client instance in a thread-safe way
 client = TelegramApi()

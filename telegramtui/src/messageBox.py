@@ -3,11 +3,10 @@ import os.path
 from telegramtui.src import npyscreen
 from telegramtui.src.telegramApi import client
 from PIL import Image
-
+from telethon.tl import types
 
 class MessageBox(npyscreen.BoxTitle):
 
-    # like a __init__
     def create(self, **kwargs):
         self.emoji = kwargs['emoji'] if 'emoji' in kwargs else False
         self.aalib = kwargs['aalib'] if 'aalib' in kwargs else False
@@ -29,7 +28,8 @@ class MessageBox(npyscreen.BoxTitle):
         data = []
         for i in range(len(messages) - 1, -1, -1):
             # replace empty char
-            messages[i].message = messages[i].message.replace(chr(8203), '')
+            if messages[i].message:
+                messages[i].message = messages[i].message.replace(chr(8203), '')
 
             data.append(messages[i].name + " " + messages[i].message)
             color_data.append(messages[i].color)
@@ -55,17 +55,8 @@ class MessageBox(npyscreen.BoxTitle):
 
         # get user info
         users, dialog_type, max_name_len = self.get_user_info(messages, current_user)
-        max_read_mess = client.dialogs[current_user].dialog.read_outbox_max_id
+        max_read_mess = client.dialogs[current_user].read_outbox_max_id
 
-        # # check buffer
-        # buff = self.buff_messages[current_user]
-        # if buff is not None and messages is not None and \
-        #         len(buff) != 0 and len(messages) != 0 and \
-        #         len(messages) != len(buff) and \
-        #         buff[0].id == messages[0].id and max_read_mess == self.buf_max_read_mess:
-        #     return buff
-
-        self.buf_max_read_mess = max_read_mess
         out = []
         for i in range(len(messages)):
             date = messages[i].date
@@ -79,26 +70,57 @@ class MessageBox(npyscreen.BoxTitle):
             # get name if message is forwarding
             prepare_forward_message = self.prepare_forward_messages(messages[i])
 
-            # if chat or interlocutor
-            if dialog_type == 1 or dialog_type == 2:
-                user_name = users[messages[i].sender.id].name
+            # if dialog with user or bot
+            if dialog_type == 1:
+                # Use sender_id to get sender information
+                sender_id = messages[i].sender_id
+                if hasattr(sender_id, 'user_id'):
+                    user_id = sender_id.user_id
+                    if user_id in users:
+                        user_name = users[user_id].name
+                    else:
+                        # Fallback to current dialog name
+                        user_name = client.dialogs[current_user].name
+                else:
+                    user_name = "Unknown"
+                
                 user_name = user_name if prepare_forward_message is False else prepare_forward_message
-                if (len(user_name) != 0):
+                if user_name:
                     user_name = textwrap.wrap(user_name, self.width // 5)[0]
                 else:
                     user_name = "Deleted Account"
-                offset = " " * (max_name_len - (len(user_name)))
+                    
+                offset = " " * (max_name_len - len(user_name))
                 name = read + user_name + ":" + offset
-                color = (len(read) + len(user_name)) * [users[messages[i].sender.id].color]
+                
+                # Determine color based on sender
+                color = []
+                if user_id == client.me.id:
+                    color = [self.parent.theme_manager.findPair(self, 'NO_EDIT')] * len(name)
+                else:
+                    color = [self.parent.theme_manager.findPair(self, 'WARNING')] * len(name)
+
+            # if chat group
+            elif dialog_type == 2:
+                # For groups, sender is always available
+                if messages[i].sender:
+                    sender = messages[i].sender
+                    user_name = sender.first_name or sender.last_name or sender.title or "Unknown"
+                else:
+                    user_name = "Unknown"
+                
+                user_name = user_name if prepare_forward_message is False else prepare_forward_message
+                user_name = textwrap.wrap(user_name, self.width // 5)[0]
+                name = read + user_name + ": "
+                color = [self.parent.theme_manager.findPair(self, 'WARNING')] * len(name)
 
             # if channel
             elif dialog_type == 3:
                 user_name = client.dialogs[current_user].name
                 user_name = user_name if prepare_forward_message is False else prepare_forward_message
                 user_name = textwrap.wrap(user_name, self.width // 5)[0]
-
                 name = user_name + ": "
-                color = len(user_name) * [self.parent.theme_manager.findPair(self, 'WARNING')]
+                color = [self.parent.theme_manager.findPair(self, 'WARNING')] * len(name)
 
             else:
                 name = ""
@@ -136,46 +158,50 @@ class MessageBox(npyscreen.BoxTitle):
 
         users = {}
         max_name_len = 0
+        entity = client.dialogs[current_user].entity
 
         # 1 - dialog with user
-        if hasattr(client.dialogs[current_user].dialog.peer, 'user_id'):
+        if isinstance(entity, types.User):
             dialog_type = 1
             # set interlocutor
-            name = client.dialogs[current_user].name if hasattr(client.dialogs[current_user], 'name') else \
-                client.dialogs[current_user].first_name
-            users[client.dialogs[current_user].dialog.peer.user_id] = user_info(
+            name = entity.first_name or entity.last_name or entity.title or "Unknown"
+            users[entity.id] = user_info(
                 self.parent.theme_manager.findPair(self, 'WARNING'), name)
 
             # set me
-            name = client.me.first_name if hasattr(client.me, 'first_name') else client.me.last_name
-            users[client.me.id] = user_info(self.parent.theme_manager.findPair(self, 'NO_EDIT'), name)
+            name = client.me.first_name or client.me.last_name or "Me"
+            users[client.me.id] = user_info(
+                self.parent.theme_manager.findPair(self, 'NO_EDIT'), name)
 
-            max_name_len = max(len(users[client.dialogs[current_user].dialog.peer.user_id].name),
+            max_name_len = max(len(users[entity.id].name),
                                len(users[client.me.id].name))
 
         # 2 - chat group
-        elif hasattr(client.dialogs[current_user].dialog.peer, 'chat_id'):
+        elif isinstance(entity, (types.Chat, types.ChatForbidden)):
             dialog_type = 2
-            for i in range(len(messages)):
-                username = ""
-                if messages[i].sender is None:
-                    username = "Unknown"
-                elif hasattr(messages[i].sender, 'first_name') and messages[i].sender.first_name is not None:
-                    username = messages[i].sender.first_name
-                elif hasattr(messages[i].sender, 'last_name') and messages[i].sender.last_name is not None:
-                    username = messages[i].sender.last_name
-
-                users[messages[i].sender.id] = user_info(
-                    self.parent.theme_manager.findPair(self, 'WARNING'), username)
-
-                max_name_len = max(max_name_len, len(username))
+            # Collect all participants in the chat
+            participants = {}
+            for message in messages:
+                if message.sender:
+                    sender = message.sender
+                    if not sender.id in participants:
+                        participants[sender.id] = sender
+            
+            # Create user info for each participant
+            for user_id, sender in participants.items():
+                name = sender.first_name or sender.last_name or sender.title or "Unknown"
+                users[user_id] = user_info(
+                    self.parent.theme_manager.findPair(self, 'WARNING'), name)
+                max_name_len = max(max_name_len, len(name))
 
             # set me
-            name = client.me.first_name if hasattr(client.me, 'first_name') else client.me.last_name
-            users[client.me.id] = user_info(self.parent.theme_manager.findPair(self, 'NO_EDIT'), name)
+            name = client.me.first_name or client.me.last_name or "Me"
+            users[client.me.id] = user_info(
+                self.parent.theme_manager.findPair(self, 'NO_EDIT'), name)
+            max_name_len = max(max_name_len, len(name))
 
         # 3 - channel
-        elif hasattr(client.dialogs[current_user].dialog.peer, 'channel_id'):
+        elif isinstance(entity, (types.Channel, types.ChannelForbidden)):
             dialog_type = 3
 
         # -1 not define
@@ -189,18 +215,8 @@ class MessageBox(npyscreen.BoxTitle):
         user_name = False
         fwd_from = message.fwd_from if hasattr(message, 'fwd_from') else None
         if fwd_from is not None:
-            if fwd_from.from_id is not None:
-                if hasattr(fwd_from, 'sender'):
-                    sender = fwd_from.sender
-                    user_name = sender.first_name if hasattr(sender, 'first_name') and \
-                                                     sender.first_name is not None else sender.last_name
-                    user_name = "Fwd " + user_name
-                else:
-                    user_name = "Fwd Unknown"
-
-                user_name = "Fwd " + fwd_from.channel.title if hasattr(message,
-                                                                       'fwd_from.channel.title') else "Fwd Unknown"
-
+            return "Fwd"  # Simplified for UI performance
+        
         return user_name
 
     # structure for out message
@@ -285,8 +301,12 @@ class MessageBox(npyscreen.BoxTitle):
             elif hasattr(media, 'document'):
                 try:
                     # print sticker like a emoji
-                    if hasattr(media.document.attributes[1], 'stickerset'):
-                        out.append(self.Messages(name, date, color,
-                                                 "Sticker: " + media.document.attributes[1].alt, mess_id, read))
+                    for attr in media.document.attributes:
+                        if isinstance(attr, types.DocumentAttributeSticker):
+                            out.append(self.Messages(name, date, color,
+                                                     "Sticker: " + attr.alt, mess_id, read))
+                            break
+                    else:
+                        out.append(self.Messages(name, date, color, "<Document>", mess_id, read))
                 except:
                     out.append(self.Messages(name, date, color, "<Document>", mess_id, read))
