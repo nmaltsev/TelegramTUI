@@ -4,6 +4,11 @@ from telegramtui.src import npyscreen
 from telegramtui.src.telegramApi import client
 from PIL import Image
 from telethon.tl import types
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
+from telethon.tl.types import UserStatusOffline, UserStatusOnline
+from telethon.tl.types import MessageMediaUnsupported
+import aalib
 
 class MessageBox(npyscreen.BoxTitle):
 
@@ -21,195 +26,100 @@ class MessageBox(npyscreen.BoxTitle):
     def when_cursor_moved(self):
         self.parent.parentApp.queue_event(npyscreen.Event("event_messagebox_change_cursor"))
 
+    _contained_widget = npyscreen.Pager
+
     def update_messages(self, current_user):
-        messages = self.get_messages_info(current_user)
-
-        color_data = []
-        data = []
-        for i in range(len(messages) - 1, -1, -1):
-            # replace empty char
-            if messages[i].message:
-                messages[i].message = messages[i].message.replace(chr(8203), '')
-
-            data.append(messages[i].name + " " + messages[i].message)
-            color_data.append(messages[i].color)
-
-        self.entry_widget.highlighting_arr_color_data = color_data
-
-        self.values = data
-
-        if len(messages) > self.height - 3:
-            self.entry_widget.start_display_at = len(messages) - self.height + 3
-        else:
-            self.entry_widget.start_display_at = 0
-
-        self.entry_widget.cursor_line = len(messages)
-
-        self.name = client.dialogs[current_user].name
-        self.footer = client.online[current_user]
-
+        # Call async get_messages_info safely and wait for result
+        messages_info = client.run_async_task(self.get_messages_info(current_user)).result()
+        self.values = messages_info
         self.display()
 
-    def get_messages_info(self, current_user):
-        messages = client.get_messages(current_user)
+    async def get_messages_info(self, current_user):
+        if not client.dialogs or current_user >= len(client.dialogs):
+            return ["No dialogs loaded"]
 
-        # get user info
-        users, dialog_type, max_name_len = self.get_user_info(messages, current_user)
-        max_read_mess = client.dialogs[current_user].read_outbox_max_id
-
-        out = []
-        for i in range(len(messages)):
-            date = messages[i].date
-            mess_id = messages[i].id
-
-            if self.emoji:
-                read = "⚫ " if max_read_mess < mess_id and messages[i].out else "  "
-            else:
-                read = "* " if max_read_mess < mess_id and messages[i].out else "  "
-
-            # get name if message is forwarding
-            prepare_forward_message = self.prepare_forward_messages(messages[i])
-
-            # if dialog with user or bot
-            if dialog_type == 1:
-                # Use sender_id to get sender information
-                sender_id = messages[i].sender_id
-                if hasattr(sender_id, 'user_id'):
-                    user_id = sender_id.user_id
-                    if user_id in users:
-                        user_name = users[user_id].name
-                    else:
-                        # Fallback to current dialog name
-                        user_name = client.dialogs[current_user].name
-                else:
-                    user_name = "Unknown"
-                
-                user_name = user_name if prepare_forward_message is False else prepare_forward_message
-                if user_name:
-                    user_name = textwrap.wrap(user_name, self.width // 5)[0]
-                else:
-                    user_name = "Deleted Account"
-                    
-                offset = " " * (max_name_len - len(user_name))
-                name = read + user_name + ":" + offset
-                
-                # Determine color based on sender
-                color = []
-                if user_id == client.me.id:
-                    color = [self.parent.theme_manager.findPair(self, 'NO_EDIT')] * len(name)
-                else:
-                    color = [self.parent.theme_manager.findPair(self, 'WARNING')] * len(name)
-
-            # if chat group
-            elif dialog_type == 2:
-                # For groups, sender is always available
-                if messages[i].sender:
-                    sender = messages[i].sender
-                    user_name = sender.first_name or sender.last_name or sender.title or "Unknown"
-                else:
-                    user_name = "Unknown"
-                
-                user_name = user_name if prepare_forward_message is False else prepare_forward_message
-                user_name = textwrap.wrap(user_name, self.width // 5)[0]
-                name = read + user_name + ": "
-                color = [self.parent.theme_manager.findPair(self, 'WARNING')] * len(name)
-
-            # if channel
-            elif dialog_type == 3:
-                user_name = client.dialogs[current_user].name
-                user_name = user_name if prepare_forward_message is False else prepare_forward_message
-                user_name = textwrap.wrap(user_name, self.width // 5)[0]
-                name = user_name + ": "
-                color = [self.parent.theme_manager.findPair(self, 'WARNING')] * len(name)
-
-            else:
-                name = ""
-                color = [0]
-
-            media = messages[i].media if hasattr(messages[i], 'media') else None
-            mess = messages[i].message if hasattr(messages[i], 'message') \
-                                          and isinstance(messages[i].message, str) else None
-
-            image_name = ""
-            if self.aalib and media is not None and hasattr(media, 'photo'):
-                image_name = name
-                name = len(name) * " "
-
-            # add message to out []
-            self.prepare_message(out, mess, name, read, mess_id, color, date)
-
-            # add media to out []
-            self.prepare_media(out, media, name, image_name, read, mess_id, color, date)
-
-        # update buffer
-        self.buff_messages[current_user] = out
-
-        # return Message obj
-        return out
-
-    # get names, colors for names
-    def get_user_info(self, messages, current_user):
-
-        # structure for the dictionary
-        class user_info:
-            def __init__(self, color, name):
-                self.color = color
-                self.name = name
-
-        users = {}
-        max_name_len = 0
         entity = client.dialogs[current_user].entity
+        messages = await client.get_messages(current_user)
+        if not messages:
+            return ["No messages"]
 
-        # 1 - dialog with user
-        if isinstance(entity, types.User):
-            dialog_type = 1
-            # set interlocutor
-            name = entity.first_name or entity.last_name or entity.title or "Unknown"
-            users[entity.id] = user_info(
-                self.parent.theme_manager.findPair(self, 'WARNING'), name)
+        lines = []
+        for message in messages:
+            sender_name, color = self.get_user_info(message)
+            text = message.message or ""
 
-            # set me
-            name = client.me.first_name or client.me.last_name or "Me"
-            users[client.me.id] = user_info(
-                self.parent.theme_manager.findPair(self, 'NO_EDIT'), name)
+            # Prepare message display (wrap text etc.)
+            formatted = self.prepare_message(sender_name, text, color)
+            lines.extend(formatted)
 
-            max_name_len = max(len(users[entity.id].name),
-                               len(users[client.me.id].name))
+            # Forwarded message info
+            if message.fwd_from:
+                fwd_lines = self.prepare_forward_messages(message)
+                lines.extend(fwd_lines)
 
-        # 2 - chat group
-        elif isinstance(entity, (types.Chat, types.ChatForbidden)):
-            dialog_type = 2
-            # Collect all participants in the chat
-            participants = {}
-            for message in messages:
-                if message.sender:
-                    sender = message.sender
-                    if not sender.id in participants:
-                        participants[sender.id] = sender
-            
-            # Create user info for each participant
-            for user_id, sender in participants.items():
-                name = sender.first_name or sender.last_name or sender.title or "Unknown"
-                users[user_id] = user_info(
-                    self.parent.theme_manager.findPair(self, 'WARNING'), name)
-                max_name_len = max(max_name_len, len(name))
+            # Show media preview for photos/stickers
+            if message.media:
+                media_lines = self.prepare_media(message.media)
+                if media_lines:
+                    lines.extend(media_lines)
 
-            # set me
-            name = client.me.first_name or client.me.last_name or "Me"
-            users[client.me.id] = user_info(
-                self.parent.theme_manager.findPair(self, 'NO_EDIT'), name)
-            max_name_len = max(max_name_len, len(name))
+            # Divider between messages
+            lines.append("")
 
-        # 3 - channel
-        elif isinstance(entity, (types.Channel, types.ChannelForbidden)):
-            dialog_type = 3
+        return lines
 
-        # -1 not define
+    def prepare_message(self, sender, text, color):
+        wrapped_text = textwrap.wrap(text, width=self.width - 10)
+        lines = [f"{sender}: " + wrapped_text[0] if wrapped_text else f"{sender}: "]
+        for line in wrapped_text[1:]:
+            lines.append(" " * (len(sender) + 2) + line)
+        # You can add color codes here if needed, npyscreen supports colors via attr
+        return lines
+
+    def prepare_forward_messages(self, message):
+        fwd = message.fwd_from
+        fwd_str = "Forwarded"
+        if fwd.from_name:
+            fwd_str += f" from {fwd.from_name}"
+        return [f"  {fwd_str}"]
+
+    def prepare_media(self, media):
+        # Only handle photo media for now
+        if isinstance(media, MessageMediaPhoto):
+            try:
+                file_path = client.run_async_task(client.download_media(media, None)).result()
+                if not file_path:
+                    return ["[Image: Download failed]"]
+
+                # Load image, convert to ASCII art with aalib
+                with Image.open(file_path) as img:
+                    img = img.convert("L").resize((40, 20))  # resize for ASCII
+                    screen = aalib.AsciiScreen(width=40, height=20)
+                    screen.put_image(0, 0, img)
+                    ascii_art = screen.render()
+                return ascii_art.splitlines()
+            except Exception as e:
+                return [f"[Image load error: {str(e)}]"]
+
+        # Add support for other media types as needed
+        return []
+
+    def get_user_info(self, message):
+        # Return sender name and a dummy color name (npyscreen color pair)
+        sender = None
+        color = 'DEFAULT'
+
+        if message.sender:
+            sender = message.sender.first_name or "Unknown"
+            if message.sender.id == client.me.id:
+                color = 'GOOD'
+            else:
+                color = 'NO_EDIT'
+
         else:
-            dialog_type = -1
+            sender = "Unknown"
 
-        return users, dialog_type, max_name_len
-
+        return sender, color
     # set forwarding name if need
     def prepare_forward_messages(self, message):
         user_name = False
